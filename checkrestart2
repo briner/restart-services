@@ -1,0 +1,341 @@
+#!/usr/bin/python3
+
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2, or (at your option)
+# any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+# MA 02110-1301 USA
+
+import sys
+import os, errno
+import re
+import pwd
+import sys
+import string
+import subprocess
+import getopt
+from stat import *
+import argparse
+
+#
+allFiles=False
+onlyPackageFiles=False
+
+
+if os.getuid() != 0:
+    sys.stderr.write('ERROR: This program must be run as root in order to obtain information\n')
+    sys.stderr.write('about all open file descriptors in the system.\n')
+    sys.exit(1)
+
+def find_cmd(cmd):
+     dirs = [ '/', '/usr/', '/usr/local/', sys.prefix ]
+     for d in dirs:
+         for sd in ('bin', 'sbin'):
+             location = os.path.join(d, sd, cmd)
+             if os.path.exists(location):
+                 return location
+     return 1
+
+class Process:
+    def __init__(self, pid):
+        self.pid = pid
+        self.files = []
+        self.descriptors = []
+        self.links = []
+        self.program = ''
+        self.cgroupname = ''
+        self.systemd_service = ''
+
+        try:
+            self.program = os.readlink('/proc/%d/exe' % self.pid)
+            # if the executable command is an interpreter such as perl/python,
+            # we want to find the real program
+            m = re.match("^/usr/bin/(perl|python)", self.program)
+            if m:
+                with open('/proc/%d/cmdline' % self.pid, 'r') as cmdline:
+                    # only match program in /usr (ex.: /usr/sbin/smokeping)
+                    # ignore child, etc.
+                    #m = re.search(r'^(([/]\w*){1,5})\s.*$', cmdline.read())
+                    # Split by null-bytes, see proc(5)
+                    data = cmdline.read().split('\x00')
+                    # Last character should be null-byte, too, see proc(5)
+                    if not data[-1]: data.pop()
+                    # Spamd sets $0 wrongly, see
+                    # https://bugzilla.redhat.com/show_bug.cgi?id=755644
+                    # i.e. the blank after spamd is relevant in case
+                    # this will be fixed in the future.
+                    m = re.match("^/usr/sbin/spamd |^spamd ", data[0])
+                    if m:
+                        self.program = "/usr/sbin/spamd"
+                    else:
+                        # Strip first value, the interpreter
+                        data.pop(0)
+                        # Check if something's left after the interpreter, see #715000
+                        if data:
+                            # Strip all options following the interpreter, e.g. python's -O
+                            m = re.match("^-", data[0])
+                            while (m):
+                                data.pop(0)
+                                m = re.match("^-", data[0])
+                            if data and data[0]: data = data[0]
+                            data = self.which(data)
+                            m = re.search(r'^(/usr/\S+)$', data)
+                            if m:
+                                # store the real full path of script as the program
+                                self.program = m.group(1)
+            # cgroup
+            fncgroup="/proc/%d/cgroup" % self.pid
+            if os.path.isfile(fncgroup):
+                for cgroupline in open(fncgroup).readlines():
+                    if cgroupline.find("1:name=")==0:
+                        cgroupline=cgroupline.rstrip()
+                        self.cgroupname=cgroupline[len("1:name="):]
+                        if self.cgroupname.find("systemd:/system.slice/") != -1:
+                            self.systemd_service=self.cgroupname.split("/")[-1]
+        except OSError as e:
+            if e.errno != errno.ENOENT:
+                if self.pid == 1:
+                    sys.stderr.write("Found unreadable pid 1. Assuming we're under vserver and continuing.\n")
+                else:
+                    sys.stderr.write('ERROR: Failed to read %d' % self.pid)
+                    raise
+        self.program = self.cleanFile(self.program)
+
+    def which(self, program):
+        if os.path.isabs(program):
+            return program
+        path = os.environ.get("PATH", os.defpath).split(os.pathsep)
+        seen = set()
+        for dir in path:
+            dir = os.path.normcase(os.path.abspath(dir))
+            if not dir in seen:
+                seen.add(dir)
+                name = os.path.join(dir, program)
+                if os.path.exists(name) and os.access(name, os.F_OK|os.X_OK) and not os.path.isdir(name):
+                    return name
+        return program
+
+    def cleanFile(self, f):
+        # /proc/pid/exe has all kinds of junk in it sometimes
+        null = f.find('\0')
+        if null != -1:
+            f = f[:null]
+        # Support symlinked /usr
+        if f.startswith('/usr'):
+            statinfo = os.lstat('/usr')[ST_MODE]
+            # If /usr is a symlink then find where it points to
+            if S_ISLNK(statinfo):
+                newusr = os.readlink('/usr')
+                if not newusr.startswith('/'):
+                    # If the symlink is relative, make it absolute
+                    newusr = os.path.join(os.path.dirname('/usr'), newusr)
+                f = re.sub('^/usr',newusr, f)
+                # print "Changing usr to " + newusr + " result:" +f; # Debugging
+        return re.sub('( \(deleted\)|.dpkg-new).*$','',f)
+
+    def listDeleted(self):
+        listfiles = []
+        listdescriptors = []
+        for f in self.files:
+            if isdeletedFile(f):
+                listfiles.append(f)
+        if  listfiles != []:
+            print("List of deleted files in use:")
+            for file in listfiles:
+                print("\t{}".format(file))
+
+    # Check if a process needs to be restarted, previously we would
+    # just check if it used libraries named '.dpkg-new' since that's
+    # what dpkg would do. Now we need to be more contrieved.
+    # Returns:
+    #  - 0 if there is no need to restart the process
+    #  - 1 if the process needs to be restarted
+    def needsRestart(self, blacklist = None):
+        for f in self.files:
+            if isdeletedFile(f, blacklist):
+                return 1
+        for f in self.links:
+            if f == 0:
+                return 1
+        return 0
+
+    def restartIt(self):
+        # find to which service it belongs
+        if self.systemd_service:
+            subprocess.check_call(["systemctl", "restart", self.systemd_service])
+
+def lsofcheck(blacklist = None):
+    processes = {}
+    #
+    for line in subprocess.check_output(['lsof', '+L', '-X', '-F',  'nfpk']).decode().splitlines():
+        field, data = line[0], line[1:]
+
+        if field == 'p':
+            process = processes.setdefault(data,Process(int(data)))
+        elif field == 'k':
+            process.links.append(data)
+        elif field == 'n':
+            # Remove the previous entry to check if this is something we should use
+            if data.startswith('/SYSV'):
+                # If we find SYSV we discard the previous descriptor
+                last = process.descriptors.pop()
+            elif data.startswith('/'):
+                last = process.descriptors.pop()
+                # Add it to the list of deleted files if the previous descriptor
+                # was DEL or lsof marks it as deleted
+                if re.compile("DEL").search(last) or re.compile("deleted").search(data) or re.compile("\(path inode=[0-9]+\)$").search(data):
+                    process.files.append(data)
+            else:
+                # We discard the previous descriptors and drop it
+                last = process.descriptors.pop()
+        elif field == 'f':
+            # Save the descriptor for later comparison
+            process.descriptors.append(data)
+    #
+    lto_restart=[]
+    for process in processes.values():
+        if process.needsRestart(blacklist):
+            lto_restart.append(process)
+    return lto_restart
+
+def isdeletedFile (f, blacklist = None):
+
+    global lc_all_c_env, file_query_check
+
+    if allFiles:
+        return 1
+    if blacklist:
+        for p in blacklist:
+            if p.search(f):
+                return 0
+    # We don't care about log files
+    if f.startswith('/var/log/') or f.startswith('/var/local/log/'):
+        return 0
+    # Or about files under temporary locations
+    if f.startswith('/var/run/') or f.startswith('/var/local/run/'):
+        return 0
+    # Or about files under /tmp
+    if f.startswith('/tmp/'):
+        return 0
+    # Or about files under /dev/shm
+    if f.startswith('/dev/shm/'):
+        return 0
+    # Or about files under /run
+    if f.startswith('/run/'):
+        return 0
+    # Or about files under /drm
+    if f.startswith('/drm'):
+        return 0
+    # Or about files under /var/tmp and /var/local/tmp
+    if f.startswith('/var/tmp/') or f.startswith('/var/local/tmp/'):
+        return 0
+    # Or /dev/zero
+    if f.startswith('/dev/zero'):
+        return 0
+    # Or /dev/pts (used by gpm)
+    if f.startswith('/dev/pts/'):
+        return 0
+    # Or /usr/lib/locale
+    if f.startswith('/usr/lib/locale/'):
+        return 0
+    # Skip files from the user's home directories
+    # many processes hold temporafy files there
+    if f.startswith('/home/'):
+        return 0
+    # Skip automatically generated files
+    if f.endswith('icon-theme.cache'):
+        return 0
+    # Skip font files
+    if f.startswith('/var/cache/fontconfig/'):
+        return 0
+    # Skip Nagios Spool
+    if f.startswith('/var/lib/nagios3/spool/'):
+        return 0
+    # Skip nagios spool files
+    if f.startswith('/var/lib/nagios3/spool/checkresults/'):
+        return 0
+    if f.startswith('/var/lib/logstash'):
+        return 0
+    # Skip, if asked to, files that do not belong to any package
+    if onlyPackageFiles:
+        # Remove some lsof information from the file to ensure that it is
+        # a proper filename
+        file_name = re.sub(r'\(.*\)','', f)
+        file_name = re.sub(r'\s+$','', file_name)
+        # First check: have we checked this file before? If we have not then make the check
+        if not file_name in file_query_check:
+                file_query_check[file_name] = ispackagedFile(file_name)
+        # Once we have the result then check if the file belongs to a package
+        if not file_query_check[file_name]:
+                return 0
+
+    # TODO: it should only care about library files (i.e. /lib, /usr/lib and the like)
+    # build that check with a regexp to exclude others
+    if f.endswith(' (deleted)'):
+        return 1
+    if re.compile("\(path inode=[0-9]+\)$").search(f):
+        return 1
+    # Default: it is a deleted file we are interested in
+    return 1
+
+
+def get_list_of_processes(blacklist):
+    if find_cmd('lsof') == 1:
+        print('ERROR: This program needs lsof in order to run', file=sys.stderr)
+        print('Please install the lsof package in your system', file=sys.stderr)
+        print('Exit !', file=sys.stderr)
+        sys.exit(1)
+    # Check if we have lsof, if not, use psdel
+    #    if find_cmd('lsof'):
+    #         toRestart = lsofcheck()
+    #    else:
+    # TODO - This does not work yet:
+    #        toRestart =     psdelcheck()
+    toRestart = lsofcheck(blacklist = blacklist)
+    def key_process(a):
+        return a.pid
+    toRestart.sort(key=key_process)
+    return toRestart
+
+def check(blacklist=[]):
+    for process in get_list_of_processes(blacklist):
+        print(process.pid, process.systemd_service, process.cgroupname, process.program)
+
+def restart():
+    lprocess= get_list_of_processes([])
+    already_restarted=[]
+    for process in lprocess:
+        if process.systemd_service in already_restarted:
+            continue
+        print(process.pid, process.systemd_service)
+        process.restartIt()
+        already_restarted.append(process.systemd_service)
+
+
+if __name__ == '__main__':
+    parser=argparse.ArgumentParser(description='tools that check if deamons must be restarted')
+    subparsers=parser.add_subparsers(help="sub-command-help")
+    # check
+    check_parser=subparsers.add_parser("check", help="check if there is some process to restart")
+    check_parser.set_defaults(name="check", func=check)
+
+    # restart
+    restart_parser=subparsers.add_parser("restart", help="restart the process")
+    restart_parser.set_defaults( name="restart", func=restart)
+
+    #
+    args = parser.parse_args()
+    if "check"==args.name:
+        check()
+    elif "restart"==args.name:
+        restart()

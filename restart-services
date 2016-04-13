@@ -143,16 +143,8 @@ class Process:
                 # print "Changing usr to " + newusr + " result:" +f; # Debugging
         return re.sub('( \(deleted\)|.dpkg-new).*$','',f)
 
-    def listDeleted(self):
-        listfiles = []
-        listdescriptors = []
-        for f in self.files:
-            if isdeletedFile(f):
-                listfiles.append(f)
-        if  listfiles != []:
-            print("List of deleted files in use:")
-            for file in listfiles:
-                print("\t{}".format(file))
+    def list_deleted(self):
+        return [f for f in self.files if isdeletedFile(f)]
 
     # Check if a process needs to be restarted, previously we would
     # just check if it used libraries named '.dpkg-new' since that's
@@ -161,6 +153,8 @@ class Process:
     #  - 0 if there is no need to restart the process
     #  - 1 if the process needs to be restarted
     def needsRestart(self, blacklist = None):
+        if not self.systemd_service:
+            return 0
         for f in self.files:
             if isdeletedFile(f, blacklist):
                 return 1
@@ -266,6 +260,9 @@ def isdeletedFile (f, blacklist = None):
         return 0
     if f.startswith('/var/lib/logstash'):
         return 0
+    # skip Asynchronous I/O
+    if f == "/[aio]":
+        return 0
     # Skip, if asked to, files that do not belong to any package
     if onlyPackageFiles:
         # Remove some lsof information from the file to ensure that it is
@@ -307,9 +304,24 @@ def get_list_of_processes(blacklist):
     toRestart.sort(key=key_process)
     return toRestart
 
-def check(blacklist=[]):
-    for process in get_list_of_processes(blacklist):
+def check(blacklist=[], is_verbose=False):
+    lprocess=get_list_of_processes(blacklist)
+    for process in lprocess:
         print(process.pid, process.systemd_service, process.cgroupname, process.program)
+        if is_verbose:
+            lfilename_deleted=process.list_deleted()
+            if lfilename_deleted:
+                print("  list of deleted files:")
+                for filename in lfilename_deleted:
+                    print("    {}".format(filename))
+    if not lprocess:
+        sys.exit()
+
+def needs_restart(blacklist=[]):
+    if get_list_of_processes(blacklist):
+        print("Yes")
+    else:
+        print("No")
 
 def restart():
     lprocess= get_list_of_processes([])
@@ -328,14 +340,20 @@ if __name__ == '__main__':
     # check
     check_parser=subparsers.add_parser("check", help="check if there is some process to restart")
     check_parser.set_defaults(name="check", func=check)
+    check_parser.add_argument("-v", "--verbose", help="increase output verbosity",
+                              action="store_true")
 
     # restart
     restart_parser=subparsers.add_parser("restart", help="restart the process")
     restart_parser.set_defaults( name="restart", func=restart)
-
+    # should_restart
+    needs_restart_parser=subparsers.add_parser("needs-restart", help="tells if it needs to restart")
+    needs_restart_parser.set_defaults(name="needs-restart", func=check)
     #
     args = parser.parse_args()
     if "check"==args.name:
-        check()
+        check(is_verbose=args.verbose)
     elif "restart"==args.name:
         restart()
+    elif "needs-restart" == args.name:
+        needs_restart()

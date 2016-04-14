@@ -46,6 +46,11 @@ def find_cmd(cmd):
                  return location
      return 1
 
+def systemctl_restart(lservices):
+    args_restart=["systemctl", "restart"]+lservices
+    subprocess.check_call(args_restart)
+
+
 class Process:
     def __init__(self, pid):
         self.pid = pid
@@ -54,7 +59,7 @@ class Process:
         self.links = []
         self.program = ''
         self.cgroupname = ''
-        self.systemd_service = ''
+        self.systemd_servicename = ''
 
         try:
             self.program = os.readlink('/proc/%d/exe' % self.pid)
@@ -101,7 +106,7 @@ class Process:
                         cgroupline=cgroupline.rstrip()
                         self.cgroupname=cgroupline[len("1:name="):]
                         if self.cgroupname.find("systemd:/system.slice/") != -1:
-                            self.systemd_service=self.cgroupname.split("/")[-1]
+                            self.systemd_servicename=self.cgroupname.split("/")[-1]
         except OSError as e:
             if e.errno != errno.ENOENT:
                 if self.pid == 1:
@@ -153,7 +158,7 @@ class Process:
     #  - 0 if there is no need to restart the process
     #  - 1 if the process needs to be restarted
     def needsRestart(self, blacklist = None):
-        if not self.systemd_service:
+        if not self.systemd_servicename:
             return 0
         for f in self.files:
             if isdeletedFile(f, blacklist):
@@ -164,9 +169,7 @@ class Process:
         return 0
 
     def restartIt(self):
-        # find to which service it belongs
-        if self.systemd_service:
-            subprocess.check_call(["systemctl", "restart", self.systemd_service])
+        systemctl_restart([self.systemd_servicename])
 
 def lsofcheck(blacklist = None):
     processes = {}
@@ -307,7 +310,7 @@ def get_list_of_processes(blacklist):
 def check(blacklist=[], is_verbose=False):
     lprocess=get_list_of_processes(blacklist)
     for process in lprocess:
-        print(process.pid, process.systemd_service, process.cgroupname, process.program)
+        print(process.pid, process.systemd_servicename, process.cgroupname, process.program)
         if is_verbose:
             lfilename_deleted=process.list_deleted()
             if lfilename_deleted:
@@ -319,20 +322,17 @@ def check(blacklist=[], is_verbose=False):
 
 def needs_restart(blacklist=[]):
     if get_list_of_processes(blacklist):
-        print("Yes")
+        print("yes")
     else:
-        print("No")
+        print("no")
 
 def restart():
     lprocess= get_list_of_processes([])
-    already_restarted=[]
-    for process in lprocess:
-        if process.systemd_service in already_restarted:
-            continue
-        print(process.pid, process.systemd_service)
-        process.restartIt()
-        already_restarted.append(process.systemd_service)
-
+    lservicename=[p.systemd_servicename for p in lprocess]
+    lservicename=list(set(lservicename))
+    systemctl_restart(lservicename)
+    for servicename in lservicename:
+        print("  {}".format(servicename))
 
 if __name__ == '__main__':
     parser=argparse.ArgumentParser(description='tools that check if deamons must be restarted')

@@ -329,13 +329,15 @@ def needs_restart(blacklist=[]):
     else:
         print("no")
 
-def restart():
+def restart(is_verbose=False):
     lprocess= get_list_of_processes([])
     lservicename=[p.systemd_servicename for p in lprocess]
     lservicename=list(set(lservicename))
-    systemctl_restart(lservicename)
-    for servicename in lservicename:
-        print("  {}".format(servicename))
+    if lservicename:
+        print("process to be restarted:")
+        for servicename in lservicename:
+            print("  {}".format(servicename))
+        systemctl_restart(lservicename)
 
 if __name__ == '__main__':
     parser=argparse.ArgumentParser(description='tools that check if deamons must be restarted')
@@ -349,16 +351,19 @@ if __name__ == '__main__':
     # restart
     restart_parser=subparsers.add_parser("restart", help="restart the process")
     restart_parser.set_defaults( name="restart", func=restart)
+    restart_parser.add_argument("-v", "--verbose", help="increase output verbosity",
+                              action="store_true")
     # should_restart
     needs_restart_parser=subparsers.add_parser("needs-restart", help="tells if it needs to restart")
     needs_restart_parser.set_defaults(name="needs-restart", func=check)
     #
     args = parser.parse_args()
-    if "check"==args.name:
-        check(is_verbose=args.verbose)
-    elif "restart"==args.name:
-        restart()
-    elif "needs-restart" == args.name:
-        needs_restart()
+    if hasattr(args, "name"):
+        if "check"==args.name:
+            check(is_verbose=args.verbose)
+        elif "restart"==args.name:
+            restart(is_verbose=args.verbose)
+        elif "needs-restart" == args.name:
+            needs_restart()
     else:
         parser.print_help()

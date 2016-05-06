@@ -60,44 +60,44 @@ class Process:
         self.program = ''
         self.cgroupname = ''
         self.systemd_servicename = ''
-
+        self.cmdline=""
+        self.cmdline_splitted=[]
         try:
             self.program = os.readlink('/proc/%d/exe' % self.pid)
+            self.cmdline=open('/proc/%d/cmdline' % self.pid, 'r').read()
+            self.cmdline_splitted = self.cmdline.split('\x00')
+            # Last character should be null-byte, too, see proc(5)
+            if not self.cmdline_splitted[-1]:
+                self.cmdline_splitted.pop()
             # if the executable command is an interpreter such as perl/python,
             # we want to find the real program
             m = re.match("^/usr/bin/(perl|python)", self.program)
             if m:
-                with open('/proc/%d/cmdline' % self.pid, 'r') as cmdline:
-                    # only match program in /usr (ex.: /usr/sbin/smokeping)
-                    # ignore child, etc.
-                    #m = re.search(r'^(([/]\w*){1,5})\s.*$', cmdline.read())
-                    # Split by null-bytes, see proc(5)
-                    data = cmdline.read().split('\x00')
-                    # Last character should be null-byte, too, see proc(5)
-                    if not data[-1]: data.pop()
-                    # Spamd sets $0 wrongly, see
-                    # https://bugzilla.redhat.com/show_bug.cgi?id=755644
-                    # i.e. the blank after spamd is relevant in case
-                    # this will be fixed in the future.
-                    m = re.match("^/usr/sbin/spamd |^spamd ", data[0])
-                    if m:
-                        self.program = "/usr/sbin/spamd"
-                    else:
-                        # Strip first value, the interpreter
-                        data.pop(0)
-                        # Check if something's left after the interpreter, see #715000
-                        if data:
-                            # Strip all options following the interpreter, e.g. python's -O
+                data=self.cmdline_splitted
+                # Spamd sets $0 wrongly, see
+                # https://bugzilla.redhat.com/show_bug.cgi?id=755644
+                # i.e. the blank after spamd is relevant in case
+                # this will be fixed in the future.
+                m = re.match("^/usr/sbin/spamd |^spamd ", data[0])
+                if m:
+                    self.program = "/usr/sbin/spamd"
+                else:
+                    # Strip first value, the interpreter
+                    data.pop(0)
+                    # Check if something's left after the interpreter, see #715000
+                    if data:
+                        # Strip all options following the interpreter, e.g. python's -O
+                        m = re.match("^-", data[0])
+                        while (m):
+                            data.pop(0)
                             m = re.match("^-", data[0])
-                            while (m):
-                                data.pop(0)
-                                m = re.match("^-", data[0])
-                            if data and data[0]: data = data[0]
-                            data = self.which(data)
-                            m = re.search(r'^(/usr/\S+)$', data)
-                            if m:
-                                # store the real full path of script as the program
-                                self.program = m.group(1)
+                        if data and data[0]:
+                            data = data[0]
+                        data = self.which(data)
+                        m = re.search(r'^(/usr/\S+)$', data)
+                        if m:
+                            # store the real full path of script as the program
+                            self.program = m.group(1)
             # cgroup
             fncgroup="/proc/%d/cgroup" % self.pid
             if os.path.isfile(fncgroup):
@@ -291,7 +291,6 @@ def isdeletedFile (f, blacklist = None):
     # Default: it is a deleted file we are interested in
     return 1
 
-
 def get_list_of_processes(blacklist):
     if find_cmd('lsof') == 1:
         print('ERROR: This program needs lsof in order to run', file=sys.stderr)
@@ -304,11 +303,16 @@ def get_list_of_processes(blacklist):
     #    else:
     # TODO - This does not work yet:
     #        toRestart =     psdelcheck()
-    toRestart = lsofcheck(blacklist = blacklist)
+
+    # find processus which has a old file
+    lprocess_to_restart = lsofcheck(blacklist = blacklist)
+    #
+    # remove some processus
+    lprocess_to_restart=[p for p in lprocess_to_restart if p.cmdline_splitted[0].find("sshd:") != 0]
     def key_process(a):
         return a.pid
-    toRestart.sort(key=key_process)
-    return toRestart
+    lprocess_to_restart.sort(key=key_process)
+    return lprocess_to_restart
 
 def check(blacklist=[], is_verbose=False):
     lprocess=get_list_of_processes(blacklist)

@@ -263,6 +263,9 @@ def isdeletedFile (f, blacklist = None):
         return 0
     if f.startswith('/var/lib/logstash'):
         return 0
+    # skip conflunce
+    if f.startswith('/var/atlassian/application-data/confluence/index/edge/'):
+        return 0
     # skip Asynchronous I/O
     if f == "/[aio]":
         return 0
@@ -357,3 +360,5 @@ if __name__ == '__main__':
         restart()
     elif "needs-restart" == args.name:
         needs_restart()
+    else:
+        parser.print_help()

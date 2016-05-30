@@ -1,4 +1,0 @@
-#!/bin/bash
-
-echo copy it to salt-master
-scp restart-services guignol:/srv/salt/state/update/files/

@@ -17,7 +17,8 @@
 # MA 02110-1301 USA
 
 import sys
-import os, errno
+import os
+import errno
 import re
 import pwd
 import sys
@@ -26,28 +27,30 @@ import subprocess
 import getopt
 from stat import *
 import argparse
+import apt
 
 #
-allFiles=False
-onlyPackageFiles=False
-
+allFiles = False
+onlyPackageFiles = False
 
 if os.getuid() != 0:
     sys.stderr.write('ERROR: This program must be run as root in order to obtain information\n')
     sys.stderr.write('about all open file descriptors in the system.\n')
     sys.exit(1)
 
+
 def find_cmd(cmd):
-     dirs = [ '/', '/usr/', '/usr/local/', sys.prefix ]
-     for d in dirs:
-         for sd in ('bin', 'sbin'):
-             location = os.path.join(d, sd, cmd)
-             if os.path.exists(location):
-                 return location
-     return 1
+    dirs = ['/', '/usr/', '/usr/local/', sys.prefix]
+    for d in dirs:
+        for sd in ('bin', 'sbin'):
+            location = os.path.join(d, sd, cmd)
+            if os.path.exists(location):
+                return location
+    return 1
+
 
 def systemctl_restart(lservices):
-    args_restart=["systemctl", "restart"]+lservices
+    args_restart = ["systemctl", "restart"] + lservices
     subprocess.check_call(args_restart)
 
 
@@ -60,11 +63,11 @@ class Process:
         self.program = ''
         self.cgroupname = ''
         self.systemd_servicename = ''
-        self.cmdline=""
-        self.cmdline_splitted=[]
+        self.cmdline = ""
+        self.cmdline_splitted = []
         try:
             self.program = os.readlink('/proc/%d/exe' % self.pid)
-            self.cmdline=open('/proc/%d/cmdline' % self.pid, 'r').read()
+            self.cmdline = open('/proc/%d/cmdline' % self.pid, 'r').read()
             self.cmdline_splitted = self.cmdline.split('\x00')
             # Last character should be null-byte, too, see proc(5)
             if not self.cmdline_splitted[-1]:
@@ -73,7 +76,7 @@ class Process:
             # we want to find the real program
             m = re.match("^/usr/bin/(perl|python)", self.program)
             if m:
-                data=self.cmdline_splitted
+                data = self.cmdline_splitted
                 # Spamd sets $0 wrongly, see
                 # https://bugzilla.redhat.com/show_bug.cgi?id=755644
                 # i.e. the blank after spamd is relevant in case
@@ -88,7 +91,7 @@ class Process:
                     if data:
                         # Strip all options following the interpreter, e.g. python's -O
                         m = re.match("^-", data[0])
-                        while (m):
+                        while m:
                             data.pop(0)
                             m = re.match("^-", data[0])
                         if data and data[0]:
@@ -99,14 +102,14 @@ class Process:
                             # store the real full path of script as the program
                             self.program = m.group(1)
             # cgroup
-            fncgroup="/proc/%d/cgroup" % self.pid
+            fncgroup = "/proc/%d/cgroup" % self.pid
             if os.path.isfile(fncgroup):
                 for cgroupline in open(fncgroup).readlines():
-                    if cgroupline.find("1:name=")==0:
-                        cgroupline=cgroupline.rstrip()
-                        self.cgroupname=cgroupline[len("1:name="):]
+                    if cgroupline.find("1:name=") == 0:
+                        cgroupline = cgroupline.rstrip()
+                        self.cgroupname = cgroupline[len("1:name="):]
                         if self.cgroupname.find("systemd:/system.slice/") != -1:
-                            self.systemd_servicename=self.cgroupname.split("/")[-1]
+                            self.systemd_servicename = self.cgroupname.split("/")[-1]
         except OSError as e:
             if e.errno != errno.ENOENT:
                 if self.pid == 1:
@@ -121,16 +124,16 @@ class Process:
             return program
         path = os.environ.get("PATH", os.defpath).split(os.pathsep)
         seen = set()
-        for dir in path:
-            dir = os.path.normcase(os.path.abspath(dir))
-            if not dir in seen:
-                seen.add(dir)
-                name = os.path.join(dir, program)
-                if os.path.exists(name) and os.access(name, os.F_OK|os.X_OK) and not os.path.isdir(name):
+        for adir in path:
+            adir = os.path.normcase(os.path.abspath(adir))
+            if adir not in seen:
+                seen.add(adir)
+                name = os.path.join(adir, program)
+                if os.path.exists(name) and os.access(name, os.F_OK | os.X_OK) and not os.path.isdir(name):
                     return name
         return program
 
-    def cleanFile(self, f):
+    def clean_file(self, f):
         # /proc/pid/exe has all kinds of junk in it sometimes
         null = f.find('\0')
         if null != -1:
@@ -144,9 +147,9 @@ class Process:
                 if not newusr.startswith('/'):
                     # If the symlink is relative, make it absolute
                     newusr = os.path.join(os.path.dirname('/usr'), newusr)
-                f = re.sub('^/usr',newusr, f)
+                f = re.sub('^/usr', newusr, f)
                 # print "Changing usr to " + newusr + " result:" +f; # Debugging
-        return re.sub('( \(deleted\)|.dpkg-new).*$','',f)
+        return re.sub('( \(deleted\)|.dpkg-new).*$', '', f)
 
     def list_deleted(self):
         return [f for f in self.files if isdeletedFile(f)]
@@ -157,7 +160,7 @@ class Process:
     # Returns:
     #  - 0 if there is no need to restart the process
     #  - 1 if the process needs to be restarted
-    def needsRestart(self, blacklist = None):
+    def needsRestart(self, blacklist=None):
         if not self.systemd_servicename:
             return 0
         for f in self.files:
@@ -171,14 +174,15 @@ class Process:
     def restartIt(self):
         systemctl_restart([self.systemd_servicename])
 
-def lsofcheck(blacklist = None):
+
+def lsofcheck(blacklist=None):
     processes = {}
     #
-    for line in subprocess.check_output(['lsof', '+L', '-X', '-F',  'nfpk']).decode().splitlines():
+    for line in subprocess.check_output(['lsof', '+L', '-X', '-F', 'nfpk']).decode().splitlines():
         field, data = line[0], line[1:]
 
         if field == 'p':
-            process = processes.setdefault(data,Process(int(data)))
+            process = processes.setdefault(data, Process(int(data)))
         elif field == 'k':
             process.links.append(data)
         elif field == 'n':
@@ -190,7 +194,8 @@ def lsofcheck(blacklist = None):
                 last = process.descriptors.pop()
                 # Add it to the list of deleted files if the previous descriptor
                 # was DEL or lsof marks it as deleted
-                if re.compile("DEL").search(last) or re.compile("deleted").search(data) or re.compile("\(path inode=[0-9]+\)$").search(data):
+                if re.compile("DEL").search(last) or re.compile("deleted").search(data) or re.compile(
+                        "\(path inode=[0-9]+\)$").search(data):
                     process.files.append(data)
             else:
                 # We discard the previous descriptors and drop it
@@ -199,14 +204,14 @@ def lsofcheck(blacklist = None):
             # Save the descriptor for later comparison
             process.descriptors.append(data)
     #
-    lto_restart=[]
+    lto_restart = []
     for process in processes.values():
         if process.needsRestart(blacklist):
             lto_restart.append(process)
     return lto_restart
 
-def isdeletedFile (f, blacklist = None):
 
+def isdeletedFile(f, blacklist=None):
     global lc_all_c_env, file_query_check
 
     if allFiles:
@@ -273,14 +278,14 @@ def isdeletedFile (f, blacklist = None):
     if onlyPackageFiles:
         # Remove some lsof information from the file to ensure that it is
         # a proper filename
-        file_name = re.sub(r'\(.*\)','', f)
-        file_name = re.sub(r'\s+$','', file_name)
+        file_name = re.sub(r'\(.*\)', '', f)
+        file_name = re.sub(r'\s+$', '', file_name)
         # First check: have we checked this file before? If we have not then make the check
         if not file_name in file_query_check:
-                file_query_check[file_name] = ispackagedFile(file_name)
+            file_query_check[file_name] = ispackagedFile(file_name)
         # Once we have the result then check if the file belongs to a package
         if not file_query_check[file_name]:
-                return 0
+            return 0
 
     # TODO: it should only care about library files (i.e. /lib, /usr/lib and the like)
     # build that check with a regexp to exclude others
@@ -290,6 +295,7 @@ def isdeletedFile (f, blacklist = None):
         return 1
     # Default: it is a deleted file we are interested in
     return 1
+
 
 def get_list_of_processes(blacklist):
     if find_cmd('lsof') == 1:
@@ -305,21 +311,24 @@ def get_list_of_processes(blacklist):
     #        toRestart =     psdelcheck()
 
     # find processus which has a old file
-    lprocess_to_restart = lsofcheck(blacklist = blacklist)
+    lprocess_to_restart = lsofcheck(blacklist=blacklist)
     #
     # remove some processus
-    lprocess_to_restart=[p for p in lprocess_to_restart if p.cmdline_splitted[0].find("sshd:") != 0]
+    lprocess_to_restart = [p for p in lprocess_to_restart if p.cmdline_splitted[0].find("sshd:") != 0]
+
     def key_process(a):
         return a.pid
+
     lprocess_to_restart.sort(key=key_process)
     return lprocess_to_restart
 
+
 def check(blacklist=[], is_verbose=False):
-    lprocess=get_list_of_processes(blacklist)
+    lprocess = get_list_of_processes(blacklist)
     for process in lprocess:
         print(process.pid, process.systemd_servicename, process.cgroupname, process.program)
         if is_verbose:
-            lfilename_deleted=process.list_deleted()
+            lfilename_deleted = process.list_deleted()
             if lfilename_deleted:
                 print("  list of deleted files:")
                 for filename in lfilename_deleted:
@@ -327,47 +336,69 @@ def check(blacklist=[], is_verbose=False):
     if not lprocess:
         sys.exit()
 
+
 def needs_restart(blacklist=[]):
     if get_list_of_processes(blacklist):
         print("yes")
     else:
         print("no")
 
+
+def kernel_needs_restart():
+    linux_release = os.uname().release
+    package_name = "linux-image-{}".format(linux_release)
+    package = apt.cache.Cache()[package_name]
+    RE_STR = "\s{}\s".format(re.escape(package.installed.version))
+    match = re.search(RE_STR, os.uname().version)
+    if match:
+        print("no")
+    else:
+        print("yes")
+
+
 def restart(is_verbose=False):
-    lprocess= get_list_of_processes([])
-    lservicename=[p.systemd_servicename for p in lprocess]
-    lservicename=list(set(lservicename))
+    lprocess = get_list_of_processes([])
+    lservicename = [p.systemd_servicename for p in lprocess]
+    lservicename = list(set(lservicename))
     if lservicename:
         print("process to be restarted:")
         for servicename in lservicename:
             print("  {}".format(servicename))
         systemctl_restart(lservicename)
 
+
 if __name__ == '__main__':
-    parser=argparse.ArgumentParser(description='tools that check if deamons must be restarted')
-    subparsers=parser.add_subparsers(help="sub-command-help")
+    parser = argparse.ArgumentParser(description='tools that check if deamons must be restarted')
+    subparsers = parser.add_subparsers(help="sub-command-help")
     # check
-    check_parser=subparsers.add_parser("check", help="check if there is some process to restart")
+    check_parser = subparsers.add_parser("check", help="check if there is some process to restart")
     check_parser.set_defaults(name="check", func=check)
     check_parser.add_argument("-v", "--verbose", help="increase output verbosity",
                               action="store_true")
 
     # restart
-    restart_parser=subparsers.add_parser("restart", help="restart the process")
-    restart_parser.set_defaults( name="restart", func=restart)
+    restart_parser = subparsers.add_parser("restart", help="restart the process")
+    restart_parser.set_defaults(name="restart", func=restart)
     restart_parser.add_argument("-v", "--verbose", help="increase output verbosity",
-                              action="store_true")
+                                action="store_true")
     # should_restart
-    needs_restart_parser=subparsers.add_parser("needs-restart", help="tells if it needs to restart")
+    needs_restart_parser = subparsers.add_parser("needs-restart", help="tells if it needs to restart")
     needs_restart_parser.set_defaults(name="needs-restart", func=check)
-    #
+
+    # should_restart_kernel
+    needs_restart_parser = subparsers.add_parser("kernel-needs-restart", help="tells if it needs to restart")
+    needs_restart_parser.set_defaults(name="kernel-needs-restart", func=check)
+
+    # needs
     args = parser.parse_args()
     if hasattr(args, "name"):
-        if "check"==args.name:
+        if "check" == args.name:
             check(is_verbose=args.verbose)
-        elif "restart"==args.name:
+        elif "restart" == args.name:
             restart(is_verbose=args.verbose)
         elif "needs-restart" == args.name:
             needs_restart()
+        elif "kernel-needs-restart" == args.name:
+            kernel_needs_restart()
     else:
         parser.print_help()
